@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delhi Civic Services Navigator | AI Jurisdiction Agent</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo-area">
+                <div class="logo-icon">
+                    <i class="fa-solid fa-map-location-dot"></i>
+                </div>
+                <div>
+                    <h1>Delhi Civic Services Navigator</h1>
+                    <p class="tagline">Elasticsearch-Powered Jurisdiction Resolver & Complaint Drafter</p>
+                </div>
+            </div>
+            <div class="header-actions" style="display: flex; gap: 1rem; align-items: center;">
+                <span id="adminBadge" class="badge hidden" style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.35); color: var(--danger); font-weight: 700;"><i class="fa-solid fa-lock-open"></i> Admin Mode</span>
+                <span class="badge"><i class="fa-solid fa-bolt"></i> Local Agent Mode</span>
+            </div>
+        </header>
+
+        <!-- Main Dashboard Layout -->
+        <main class="dashboard-grid">
+            
+            <!-- Left Panel: Filing Form -->
+            <section class="panel form-panel">
+                <div class="panel-header">
+                    <h2><i class="fa-solid fa-pen-to-square"></i> File a Complaint</h2>
+                    <p class="panel-desc">Fill in the details. The agent will run semantic search to map the correct jurisdiction.</p>
+                </div>
+                
+                <form id="complaintForm" class="civic-form">
+                    
+                    <!-- Active Edit Banner -->
+                    <div id="editBanner" class="alert alert-warning hidden" style="grid-column: 1 / -1; margin-bottom: 0px; display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <i class="fa-solid fa-pen-to-square"></i> <strong>Modifying:</strong> <span id="editComplaintId" style="font-family: monospace;"></span>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline" onclick="cancelEdit()" style="padding: 0.2rem 0.5rem; font-size: 0.75rem; border-color: rgba(245, 158, 11, 0.4); color: #fbd38d;">Cancel</button>
+                    </div>
+                    
+                    <div class="form-group full-width">
+                        <label for="complaint_type">Complaint Type <span class="required">*</span></label>
+                        <select id="complaint_type" name="complaint_type" required>
+                            <option value="" disabled selected>-- Select Complaint Type --</option>
+                            <option value="water">Water Supply & Quality (DJB)</option>
+                            <option value="sewage">Sewer Blockage & Overflow (DJB)</option>
+                            <option value="electricity">Electricity & DISCOM Services (BSES/Tata Power)</option>
+                            <option value="sanitation">Sanitation & Garbage Management (MCD)</option>
+                            <option value="road">Road Maintenance & Potholes (MCD/PWD)</option>
+                            <option value="traffic">Traffic & Parking Violations (Traffic Police)</option>
+                            <option value="encroachment">Illegal Encroachments & Construction (MCD/DDA)</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group full-width">
+                        <label for="complaint">Complaint / Issue Description <span class="required">*</span></label>
+                        <textarea id="complaint" name="complaint" rows="4" placeholder="Describe the civic issue in detail (e.g. dirty black water coming from tap in Rohini Sector 8, streetlights broken on main PWD road, hanging wires sparking...)" required></textarea>
+                        <div class="field-hint">Be specific about road type (e.g. colony road vs main road) and source of issue for higher routing accuracy.</div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="name">Your Name <span class="required">*</span></label>
+                            <div class="input-icon-wrapper">
+                                <i class="fa-solid fa-user input-icon"></i>
+                                <input type="text" id="name" name="name" placeholder="John Doe" required>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="contact">Contact Number <span class="required">*</span></label>
+                            <div class="input-icon-wrapper">
+                                <i class="fa-solid fa-phone input-icon"></i>
+                                <input type="tel" id="contact" name="contact" placeholder="98765xxxxx" required>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group full-width">
+                        <label for="address">Address <span class="required">*</span></label>
+                        <div class="input-icon-wrapper">
+                            <i class="fa-solid fa-house input-icon"></i>
+                            <input type="text" id="address" name="address" placeholder="Flat No., Street, Block / Phase" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row three-cols">
+                        <div class="form-group">
+                            <label for="city">City <span class="required">*</span></label>
+                            <input type="text" id="city" name="city" value="Delhi" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="state">State <span class="required">*</span></label>
+                            <input type="text" id="state" name="state" value="Delhi" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="pin">Pin Code <span class="required">*</span></label>
+                            <input type="text" id="pin" name="pin" placeholder="110085" required maxlength="6">
+                        </div>
+                    </div>
+
+                    <!-- Dynamic issue-specific fields container -->
+                    <div id="dynamicFieldsContainer" class="form-group full-width hidden">
+                        <!-- Filled dynamically by JavaScript -->
+                    </div>
+
+                    <!-- Supporting Document (Mandatory for some types) -->
+                    <div id="supportingDocGroup" class="form-group full-width hidden">
+                        <label id="docUploadLabel">Supporting Document / Photograph <span class="required">*</span></label>
+                        <div class="file-upload-wrapper">
+                            <input type="file" id="supporting_doc" accept="image/*,application/pdf" class="file-upload-input">
+                            <div class="file-upload-label" id="fileUploadLabelText">
+                                <i class="fa-solid fa-cloud-arrow-up"></i>
+                                <span>Click or Drag to Upload proof (Image/PDF)</span>
+                                <span class="field-hint">Mandatory for this complaint type</span>
+                            </div>
+                        </div>
+                        <input type="hidden" id="supporting_doc_data" name="supporting_doc_data">
+                    </div>
+
+                    <div class="form-group full-width">
+                        <label for="landmark">Landmark</label>
+                        <div class="input-icon-wrapper">
+                            <i class="fa-solid fa-location-crosshairs input-icon"></i>
+                            <input type="text" id="landmark" name="landmark" placeholder="Near Metro Station, opposite community hall, etc.">
+                        </div>
+                    </div>
+
+                    <div class="form-group full-width">
+                        <label for="additional_comments">Additional Comments</label>
+                        <textarea id="additional_comments" name="additional_comments" rows="2" placeholder="Any meter number, specific road names, or historical references..."></textarea>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-block" id="submitBtn">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> Route & Generate Complaint
+                    </button>
+                </form>
+
+                <!-- Search Suggestions helper -->
+                <div class="locality-helper">
+                    <h3><i class="fa-solid fa-circle-info"></i> Supported Test Localities</h3>
+                    <p>Type these in Address/PIN for accurate sub-division mapping:</p>
+                    <div class="locality-tags" id="localityTags">
+                        <!-- Filled by JS -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel: Agent Outputs (Hidden initially or showing placeholder) -->
+            <section class="panel output-panel" id="outputPanel">
+                <!-- Placeholder State -->
+                <div class="placeholder-state" id="outputPlaceholder">
+                    <div class="placeholder-icon">
+                        <i class="fa-solid fa-map-location"></i>
+                    </div>
+                    <h2>Waiting for Complaint Submission</h2>
+                    <p>Enter your details and click the button. The Elasticsearch Agent will resolve the overlapping jurisdiction issues, map your location, list required documents, and write your complaint letter instantly.</p>
+                </div>
+
+                <!-- Result Content (Hidden by default) -->
+                <div class="result-content hidden" id="resultContent">
+                    
+                    <!-- Top Summary Card -->
+                    <div class="result-card agency-card">
+                        <div class="card-header-flex">
+                            <div>
+                                <span class="badge badge-success"><i class="fa-solid fa-check-double"></i> Routing Resolved</span>
+                                <h3 id="resolvedAgency">Municipal Corporation of Delhi (MCD)</h3>
+                                <p class="category-meta">Category: <strong id="resolvedCategory">Sanitation</strong> | ES Score: <strong id="esScore">4.8</strong></p>
+                            </div>
+                            <div class="agency-icon-wrapper" id="agencyIcon">
+                                <i class="fa-solid fa-building-flag"></i>
+                            </div>
+                        </div>
+                        <div class="divider"></div>
+                        <div class="routing-explanation">
+                            <h4><i class="fa-solid fa-brain"></i> Agent Explanation:</h4>
+                            <p id="routingReason">Routed to MCD because the issue contains sanitation keywords and falls under local street cleaning rules.</p>
+                        </div>
+                        
+                        <!-- Zone & Area details -->
+                        <div class="geo-specs">
+                            <div class="spec-item">
+                                <span class="spec-label">Locality Resolved</span>
+                                <span class="spec-val" id="resLocality">Rohini</span>
+                            </div>
+                            <div class="spec-item">
+                                <span class="spec-label">MCD Zone</span>
+                                <span class="spec-val" id="resMcdZone">Rohini Zone</span>
+                            </div>
+                            <div class="spec-item">
+                                <span class="spec-label">Power DISCOM</span>
+                                <span class="spec-val" id="resDiscom">Tata Power (TPDDL)</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Output Tabs Section -->
+                    <div class="tabs-container">
+                        <div class="tab-headers">
+                            <button class="tab-btn active" onclick="switchTab(event, 'tabEnglish')">
+                                <i class="fa-solid fa-language"></i> Draft Letter (EN)
+                            </button>
+                            <button class="tab-btn" onclick="switchTab(event, 'tabHindi')">
+                                <i class="fa-solid fa-language"></i> Draft Letter (HI)
+                            </button>
+                            <button class="tab-btn" onclick="switchTab(event, 'tabDispute')">
+                                <i class="fa-solid fa-triangle-exclamation"></i> Dispute Solver
+                            </button>
+                        </div>
+
+                        <!-- Tab Content: English -->
+                        <div class="tab-content active" id="tabEnglish">
+                            <div class="action-bar">
+                                <span>English Grievance Draft</span>
+                                <div class="action-buttons">
+                                    <button class="btn btn-sm btn-outline" onclick="copyText('draftEnText', this)">
+                                        <i class="fa-regular fa-copy"></i> Copy
+                                    </button>
+                                    <button class="btn btn-sm btn-outline" onclick="downloadText('draftEnText', 'complaint_english.txt')">
+                                        <i class="fa-solid fa-download"></i> Download
+                                    </button>
+                                    <button class="btn btn-sm btn-outline" onclick="printText('draftEnText')">
+                                        <i class="fa-solid fa-print"></i> Print
+                                    </button>
+                                </div>
+                            </div>
+                            <pre class="letter-preview" id="draftEnText" contenteditable="true"></pre>
+                        </div>
+
+                        <!-- Tab Content: Hindi -->
+                        <div class="tab-content" id="tabHindi">
+                            <div class="action-bar">
+                                <span>Hindi Grievance Draft (शिकायत का प्रारूप)</span>
+                                <div class="action-buttons">
+                                    <button class="btn btn-sm btn-outline" onclick="copyText('draftHiText', this)">
+                                        <i class="fa-regular fa-copy"></i> Copy
+                                    </button>
+                                    <button class="btn btn-sm btn-outline" onclick="downloadText('draftHiText', 'complaint_hindi.txt')">
+                                        <i class="fa-solid fa-download"></i> Download
+                                    </button>
+                                    <button class="btn btn-sm btn-outline" onclick="printText('draftHiText')">
+                                        <i class="fa-solid fa-print"></i> Print
+                                    </button>
+                                </div>
+                            </div>
+                            <pre class="letter-preview hindi-text" id="draftHiText" contenteditable="true"></pre>
+                        </div>
+
+                        <!-- Tab Content: Dispute Solver -->
+                        <div class="tab-content" id="tabDispute">
+                            <div class="alert alert-warning">
+                                <i class="fa-solid fa-shield-halved"></i> <strong>Jurisdiction Dispute Solver:</strong> Use this counter-grievance letter if the agency rejects your complaint claiming "not our jurisdiction." It escalates the boundary conflict to the Delhi Grievance Portal (PGMS).
+                            </div>
+                            <div class="action-bar">
+                                <span>Escalation & Pushback Draft</span>
+                                <div class="action-buttons">
+                                    <button class="btn btn-sm btn-outline" onclick="copyText('disputeText', this)">
+                                        <i class="fa-regular fa-copy"></i> Copy
+                                    </button>
+                                    <button class="btn btn-sm btn-outline" onclick="downloadText('disputeText', 'jurisdiction_dispute_escalation.txt')">
+                                        <i class="fa-solid fa-download"></i> Download
+                                    </button>
+                                </div>
+                            </div>
+                            <pre class="letter-preview" id="disputeText" contenteditable="true"></pre>
+                        </div>
+                    </div>
+
+                    <!-- Bottom Grid: Required Docs & Helplines -->
+                    <div class="output-subgrid">
+                        
+                        <!-- Documents checklist -->
+                        <div class="result-card checklist-card">
+                            <h3><i class="fa-solid fa-file-invoice"></i> Required Documents & Proofs</h3>
+                            <p class="section-subtitle">Ensure you attach these files when submitting:</p>
+                            <ul class="checklist" id="docChecklist">
+                                <!-- Filled dynamically -->
+                            </ul>
+                        </div>
+
+                        <!-- Submission channels -->
+                        <div class="result-card contact-card">
+                            <h3><i class="fa-solid fa-paper-plane"></i> Direct Submission Channels</h3>
+                            <p class="section-subtitle">File the drafted letter using these helplines:</p>
+                            
+                            <div class="contact-details" id="helplineInfo">
+                                <!-- Filled dynamically -->
+                            </div>
+                        </div>
+
+                    </div>
+
+                </div>
+            </section>
+        </main>
+
+        <!-- History Dashboard -->
+        <section class="panel history-panel" style="margin-top: 1.5rem;">
+            <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+                <div>
+                    <h2><i class="fa-solid fa-clock-rotate-left"></i> Complaints History</h2>
+                    <p class="panel-desc">Track and manage previously filed complaints. Statuses persist locally.</p>
+                </div>
+                <div class="filter-group" style="display: flex; align-items: center; gap: 0.5rem;">
+                    <label for="agencyFilter" style="font-size: 0.8rem; color: var(--text-secondary); font-weight: 600;">Filter by Agency:</label>
+                    <select id="agencyFilter" style="padding: 0.4rem 0.8rem; font-size: 0.85rem; width: 220px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); background: rgba(15, 23, 42, 0.4); color: var(--text-primary); outline: none;">
+                        <option value="all">All Agencies</option>
+                        <option value="mcd">MCD (Municipal Corporation)</option>
+                        <option value="djb">DJB (Delhi Jal Board)</option>
+                        <option value="pwd">PWD (Public Works Dept)</option>
+                        <option value="discom">DISCOMs (Power Companies)</option>
+                        <option value="traffic">Delhi Traffic Police</option>
+                        <option value="dda">DDA (Development Authority)</option>
+                        <option value="ndmc">NDMC (New Delhi Council)</option>
+                        <option value="cantonment">Delhi Cantonment Board</option>
+                    </select>
+                </div>
+            </div>
+            <div class="history-content" style="padding: 1.5rem;">
+                <div id="historyPlaceholder" class="history-placeholder">
+                    <p><i class="fa-solid fa-folder-open"></i> No complaints filed yet.</p>
+                </div>
+                <div class="table-responsive hidden" id="historyTableContainer">
+                    <table class="history-table">
+                        <thead>
+                            <tr>
+                                <th>Complaint ID</th>
+                                <th>Date Filed</th>
+                                <th>Category / Type</th>
+                                <th>Assigned Agency</th>
+                                <th>Complainant</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyList">
+                            <!-- Filled dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+        
+        <!-- Detail Viewer Modal -->
+        <div id="detailsModal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3><i class="fa-solid fa-file-circle-info"></i> Complaint Record Details</h3>
+                    <button class="close-btn" onclick="closeModal()">&times;</button>
+                </div>
+                <div class="modal-body" id="modalBody">
+                    <!-- Filled dynamically by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>Delhi Civic Services Navigator © 2026. Made with <i class="fa-solid fa-heart" style="color: #e25555;"></i> for the citizens of Delhi.</p>
+        </footer>
+    </div>
+
+    <!-- Script imports -->
+    <script src="app.js"></script>
+</body>
+</html>
