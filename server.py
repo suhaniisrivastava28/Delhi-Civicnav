@@ -372,7 +372,8 @@ class ElasticsearchWrapper:
     
     def get_cluster_info(self):
         """Get cluster connection info."""
-        if self.use_real:
+        # Always try real ES if client exists (handles Flask debug reloader case)
+        if self.real is not None:
             try:
                 info = self.real.info()
                 return {
