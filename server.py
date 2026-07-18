@@ -1,32 +1,58 @@
 import os
 import json
 import re
+import time
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__, static_folder='static')
 
 # =====================================================================
-# HIGH-FIDELITY ELASTICSEARCH DSL SIMULATOR
+# ELASTICSEARCH CLIENT CONFIGURATION
 # =====================================================================
-# This mimics the behavior of the elasticsearch-py client and Elasticsearch
-# query scoring (TF-IDF/BM25 approximation) for routing citizen complaints.
-# To connect to a live Elasticsearch cluster, one would replace this with:
-#   from elasticsearch import Elasticsearch
-#   es = Elasticsearch(["http://localhost:9200"])
-# and upload these documents to indexes "localities" and "agency_rules".
+# Connects to a live Elasticsearch cluster. Falls back to an in-memory
+# simulator if the cluster is unreachable.
+# =====================================================================
+
+ES_HOST = os.environ.get("ES_HOST", "http://localhost:9200")
+USE_REAL_ES = False  # Will be set to True if connection succeeds
+
+try:
+    from elasticsearch import Elasticsearch as RealElasticsearch
+    from elasticsearch.helpers import bulk
+    _es_client = RealElasticsearch(
+        ES_HOST,
+        verify_certs=False,
+        request_timeout=5,
+        max_retries=1,
+        retry_on_timeout=False
+    )
+    # Test connection
+    info = _es_client.info()
+    print(f"[OK] Connected to Elasticsearch {info['version']['number']} at {ES_HOST}")
+    USE_REAL_ES = True
+except Exception as e:
+    print(f"[WARN] Elasticsearch not available at {ES_HOST}: {e}")
+    print("   Falling back to in-memory ElasticsearchSimulator.")
+    _es_client = None
+
+# =====================================================================
+# UNIFIED ES WRAPPER (Real ES or Simulator — same interface)
 # =====================================================================
 
 class ElasticsearchSimulator:
+    """In-memory fallback that mimics the elasticsearch-py client API."""
     def __init__(self):
-        self.indices = {
+        self._indices = {
             "localities": [],
             "agency_rules": []
         }
 
     def index(self, index, id, body):
-        body["id"] = id
-        self.indices[index].append(body)
+        body["_sim_id"] = id
+        if index not in self._indices:
+            self._indices[index] = []
+        self._indices[index].append(body)
 
     def _tokenize(self, text):
         if not text:
@@ -44,10 +70,10 @@ class ElasticsearchSimulator:
         return tokens
 
     def search(self, index, body):
-        if index not in self.indices:
-            return {"hits": {"total": {"value": 0}, "hits": []}}
+        if index not in self._indices:
+            return {"hits": {"total": {"value": 0}, "max_score": 0.0, "hits": []}}
 
-        docs = self.indices[index]
+        docs = self._indices[index]
         query = body.get("query", {})
         results = []
 
@@ -55,11 +81,9 @@ class ElasticsearchSimulator:
             score = 0.0
             matched = False
 
-            # Simple DSL Parser for 'bool' queries
             if "bool" in query:
                 bool_query = query["bool"]
                 
-                # must clause (all must match)
                 must_clause = bool_query.get("must", [])
                 must_failed = False
                 for clause in must_clause:
@@ -72,7 +96,6 @@ class ElasticsearchSimulator:
                 if must_failed and must_clause:
                     continue
 
-                # filter clause (must match, does not affect score)
                 filter_clause = bool_query.get("filter", [])
                 filter_failed = False
                 for clause in filter_clause:
@@ -84,7 +107,6 @@ class ElasticsearchSimulator:
                 if filter_failed and filter_clause:
                     continue
 
-                # should clause (adds to score, at least one should match if no must clause is present)
                 should_clause = bool_query.get("should", [])
                 should_matched = False
                 should_score = 0.0
@@ -103,18 +125,16 @@ class ElasticsearchSimulator:
                     matched = True if (not must_clause or not must_failed) else False
 
             else:
-                # Direct match or other query formats
                 score, matched = self._evaluate_clause(doc, query)
 
             if matched or score > 0:
                 results.append({
                     "_index": index,
-                    "_id": doc.get("id"),
+                    "_id": doc.get("_sim_id"),
                     "_score": round(score, 4),
-                    "_source": doc
+                    "_source": {k: v for k, v in doc.items() if k != "_sim_id"}
                 })
 
-        # Sort by score descending
         results.sort(key=lambda x: x["_score"], reverse=True)
 
         return {
@@ -126,7 +146,6 @@ class ElasticsearchSimulator:
         }
 
     def _evaluate_clause(self, doc, clause):
-        # Supports term, match, multi_match, match_phrase
         if "term" in clause:
             field, value = list(clause["term"].items())[0]
             doc_val = doc.get(field, "")
@@ -141,7 +160,6 @@ class ElasticsearchSimulator:
             doc_tokens = self._tokenize(doc_val)
             intersection = query_tokens.intersection(doc_tokens)
             if intersection:
-                # TF-IDF approximation based on overlap ratio
                 score = (len(intersection) / len(query_tokens)) * 5.0
                 return score, True
             return 0.0, False
@@ -155,7 +173,6 @@ class ElasticsearchSimulator:
             max_score = 0.0
             matched = False
             for raw_field in fields:
-                # Handle boost notation, e.g. "title^3"
                 boost = 1.0
                 field = raw_field
                 if "^" in raw_field:
@@ -180,8 +197,202 @@ class ElasticsearchSimulator:
 
         return 0.0, False
 
-# Instantiate Simulator
-es = ElasticsearchSimulator()
+
+class ElasticsearchWrapper:
+    """Unified wrapper — delegates to real ES or simulator with the same interface."""
+    
+    def __init__(self, real_client, use_real):
+        self.real = real_client
+        self.use_real = use_real
+        self.simulator = ElasticsearchSimulator()
+        self._index_data = {}  # Keep a copy of indexed data for inspection & re-seeding
+    
+    def create_indices(self, localities_data, agency_rules_data):
+        """Create indices with proper mappings and seed data."""
+        self._index_data["localities"] = localities_data
+        self._index_data["agency_rules"] = agency_rules_data
+        
+        if self.use_real:
+            self._create_real_indices(localities_data, agency_rules_data)
+        
+        # Always seed the simulator as well (for inspection endpoints)
+        for idx, loc in enumerate(localities_data):
+            self.simulator.index("localities", id=f"loc_{idx}", body=dict(loc))
+        for idx, rule in enumerate(agency_rules_data):
+            self.simulator.index("agency_rules", id=f"rule_{idx}", body=dict(rule))
+    
+    def _create_real_indices(self, localities_data, agency_rules_data):
+        """Create real Elasticsearch indices with custom mappings."""
+        # Index settings with custom analyzer
+        settings = {
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+                "analysis": {
+                    "analyzer": {
+                        "civic_analyzer": {
+                            "type": "custom",
+                            "tokenizer": "standard",
+                            "filter": ["lowercase", "english_stemmer", "civic_synonyms"]
+                        }
+                    },
+                    "filter": {
+                        "english_stemmer": {
+                            "type": "stemmer",
+                            "language": "english"
+                        },
+                        "civic_synonyms": {
+                            "type": "synonym",
+                            "synonyms": [
+                                "pothole,crater,pit",
+                                "sewer,sewage,drain",
+                                "garbage,trash,waste,rubbish",
+                                "electricity,power,current,bijli",
+                                "water,paani,jal",
+                                "road,street,sadak,marg",
+                                "encroachment,illegal,unauthorized"
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Localities index mapping
+        localities_mapping = {
+            **settings,
+            "mappings": {
+                "properties": {
+                    "name": {"type": "text", "analyzer": "civic_analyzer", "fields": {"keyword": {"type": "keyword"}}},
+                    "pin": {"type": "keyword"},
+                    "mcd_zone": {"type": "keyword"},
+                    "discom": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                    "sub_division": {"type": "text", "analyzer": "civic_analyzer", "fields": {"keyword": {"type": "keyword"}}},
+                    "type": {"type": "keyword"}
+                }
+            }
+        }
+        
+        # Agency rules index mapping
+        agency_rules_mapping = {
+            **settings,
+            "mappings": {
+                "properties": {
+                    "category": {"type": "text", "analyzer": "civic_analyzer", "fields": {"keyword": {"type": "keyword"}}},
+                    "keywords": {"type": "text", "analyzer": "civic_analyzer"},
+                    "default_agency": {"type": "keyword"},
+                    "agency_full_name": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                    "description": {"type": "text", "analyzer": "civic_analyzer"},
+                    "documents_required": {"type": "text"},
+                    "helpline": {"type": "object", "enabled": False},
+                    "draft_template_en": {"type": "text", "index": False},
+                    "draft_template_hi": {"type": "text", "index": False}
+                }
+            }
+        }
+        
+        try:
+            # Delete and recreate indices
+            for idx_name in ["localities", "agency_rules"]:
+                if self.real.indices.exists(index=idx_name):
+                    self.real.indices.delete(index=idx_name)
+                    print(f"   Deleted existing index: {idx_name}")
+            
+            self.real.indices.create(index="localities", body=localities_mapping)
+            print("   [OK] Created index: localities")
+            
+            self.real.indices.create(index="agency_rules", body=agency_rules_mapping)
+            print("   [OK] Created index: agency_rules")
+            
+            # Bulk index localities
+            loc_actions = []
+            for idx, loc in enumerate(localities_data):
+                loc_actions.append({
+                    "_index": "localities",
+                    "_id": f"loc_{idx}",
+                    "_source": loc
+                })
+            success, errors = bulk(self.real, loc_actions)
+            print(f"   [OK] Indexed {success} localities ({errors} errors)")
+            
+            # Bulk index agency rules
+            rule_actions = []
+            for idx, rule in enumerate(agency_rules_data):
+                rule_actions.append({
+                    "_index": "agency_rules",
+                    "_id": f"rule_{idx}",
+                    "_source": rule
+                })
+            success, errors = bulk(self.real, rule_actions)
+            print(f"   [OK] Indexed {success} agency rules ({errors} errors)")
+            
+            # Refresh indices to make data searchable
+            self.real.indices.refresh(index="localities")
+            self.real.indices.refresh(index="agency_rules")
+            print("   [OK] Indices refreshed and ready")
+            
+        except Exception as e:
+            print(f"   [ERR] Error creating real ES indices: {e}")
+            print("   Falling back to simulator.")
+            self.use_real = False
+    
+    def search(self, index, body):
+        """Search using real ES or simulator."""
+        if self.use_real:
+            try:
+                res = self.real.search(index=index, body=body)
+                return {
+                    "hits": {
+                        "total": {"value": res["hits"]["total"]["value"]},
+                        "max_score": res["hits"]["max_score"] or 0.0,
+                        "hits": [
+                            {
+                                "_index": hit["_index"],
+                                "_id": hit["_id"],
+                                "_score": hit["_score"] or 0.0,
+                                "_source": hit["_source"]
+                            }
+                            for hit in res["hits"]["hits"]
+                        ]
+                    }
+                }
+            except Exception as e:
+                print(f"   ES search error (falling back to simulator): {e}")
+                return self.simulator.search(index, body)
+        else:
+            return self.simulator.search(index, body)
+    
+    def get_index_data(self, index_name):
+        """Get raw indexed data for inspection."""
+        return self._index_data.get(index_name, [])
+    
+    def get_index_names(self):
+        """Get all index names."""
+        return list(self._index_data.keys())
+    
+    def get_cluster_info(self):
+        """Get cluster connection info."""
+        if self.use_real:
+            try:
+                info = self.real.info()
+                return {
+                    "mode": "Real Elasticsearch",
+                    "version": info["version"]["number"],
+                    "cluster_name": info["cluster_name"],
+                    "host": ES_HOST
+                }
+            except:
+                pass
+        return {
+            "mode": "In-Memory Simulator (fallback)",
+            "version": "simulator",
+            "cluster_name": "local-simulator",
+            "host": "in-memory"
+        }
+
+# Instantiate the wrapper
+es = ElasticsearchWrapper(_es_client, USE_REAL_ES)
+
 
 # =====================================================================
 # DATA SEEDING (LOCALITIES & RULES)
@@ -232,8 +443,7 @@ localities_data = [
     {"name": "Delhi Cantonment", "pin": "110010", "mcd_zone": "Cantonment Board", "discom": "Cantonment Board / MES", "sub_division": "Delhi Cantt", "type": "Cantonment"}
 ]
 
-for idx, loc in enumerate(localities_data):
-    es.index("localities", id=f"loc_{idx}", body=loc)
+# Note: data will be indexed below after agency_rules_data is defined
 
 # 2. Jurisdiction Rules Database
 agency_rules_data = [
@@ -722,16 +932,17 @@ Contact: {contact}""",
     }
 ]
 
-for idx, rule in enumerate(agency_rules_data):
-    es.index("agency_rules", id=f"rule_{idx}", body=rule)
+# Seed both indices (real ES + simulator) via the unified wrapper
+es.create_indices(localities_data, agency_rules_data)
+print(f"   ES Mode: {'Real Elasticsearch' if es.use_real else 'In-Memory Simulator'}")
 
 # =====================================================================
 # AGENT LOGIC (JURISDICTION ROUTING AGENT OVER ES)
 # =====================================================================
 
 class JurisdictionAgent:
-    def __init__(self, es_simulator):
-        self.es = es_simulator
+    def __init__(self, es_wrapper):
+        self.es = es_wrapper
 
     def resolve_locality(self, pin, address, landmark):
         pin_clean = str(pin).strip()
@@ -1128,6 +1339,126 @@ def home():
 @app.route('/<path:path>')
 def send_static(path):
     return send_from_directory(app.static_folder, path)
+
+# =====================================================================
+# ELASTICSEARCH INDEX INSPECTION ENDPOINTS
+# =====================================================================
+
+@app.route('/api/es/status', methods=['GET'])
+def api_es_status():
+    """Get Elasticsearch cluster connection status."""
+    return jsonify(es.get_cluster_info())
+
+@app.route('/api/es/indices', methods=['GET'])
+def api_es_list_indices():
+    """List all ES indices and their document counts."""
+    summary = {}
+    for index_name in es.get_index_names():
+        docs = es.get_index_data(index_name)
+        summary[index_name] = {
+            "document_count": len(docs),
+            "fields": list(docs[0].keys()) if docs else []
+        }
+    info = es.get_cluster_info()
+    return jsonify({"cluster": info, "indices": summary})
+
+@app.route('/api/es/index/<index_name>', methods=['GET'])
+def api_es_view_index(index_name):
+    """View all documents in a specific ES index. 
+    Usage: /api/es/index/localities  or  /api/es/index/agency_rules
+    """
+    docs = es.get_index_data(index_name)
+    if not docs:
+        return jsonify({"error": f"Index '{index_name}' not found. Available: {es.get_index_names()}"}), 404
+    
+    # Strip heavy template fields for readability
+    clean_docs = []
+    for doc in docs:
+        clean = {k: v for k, v in doc.items() if not k.startswith("draft_template")}
+        if "draft_template_en" in doc:
+            clean["draft_template_en"] = doc["draft_template_en"][:80] + "..."
+        if "draft_template_hi" in doc:
+            clean["draft_template_hi"] = doc["draft_template_hi"][:80] + "..."
+        clean_docs.append(clean)
+    
+    return jsonify({
+        "index": index_name,
+        "total_documents": len(docs),
+        "es_mode": es.get_cluster_info()["mode"],
+        "documents": clean_docs
+    })
+
+@app.route('/api/es/search/<index_name>', methods=['GET'])
+def api_es_search(index_name):
+    """Run a text search against any ES index.
+    Usage: /api/es/search/localities?q=rohini
+           /api/es/search/agency_rules?q=sewer+overflow
+    """
+    if index_name not in es.get_index_names():
+        return jsonify({"error": f"Index '{index_name}' not found."}), 404
+    
+    q = request.args.get("q", "")
+    if not q:
+        return jsonify({"error": "Provide a search query via ?q=your+search+text"}), 400
+    
+    # Build appropriate query based on index
+    if index_name == "localities":
+        query = {
+            "query": {
+                "bool": {
+                    "should": [
+                        {"term": {"pin": q}},
+                        {"multi_match": {"query": q, "fields": ["name", "sub_division"]}}
+                    ]
+                }
+            }
+        }
+    elif index_name == "agency_rules":
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"multi_match": {"query": q, "fields": ["keywords^2", "category", "description"]}}
+                    ]
+                }
+            }
+        }
+    else:
+        query = {"query": {"multi_match": {"query": q, "fields": ["*"]}}}
+    
+    res = es.search(index_name, query)
+    
+    # Clean results for readability
+    hits = []
+    for hit in res["hits"]["hits"]:
+        source = {k: v for k, v in hit["_source"].items() if not k.startswith("draft_template")}
+        hits.append({
+            "id": hit["_id"],
+            "score": hit["_score"],
+            "source": source
+        })
+    
+    return jsonify({
+        "index": index_name,
+        "query_text": q,
+        "es_mode": es.get_cluster_info()["mode"],
+        "total_hits": res["hits"]["total"]["value"],
+        "max_score": res["hits"]["max_score"],
+        "results": hits
+    })
+
+@app.route('/api/es/resolve-pin/<pin>', methods=['GET'])
+def api_es_resolve_pin(pin):
+    """Resolve a PIN code using the full pipeline (Public API → ES fallback).
+    Usage: /api/es/resolve-pin/110085
+    """
+    locality, score = agent.resolve_locality(pin, "", "")
+    return jsonify({
+        "pin": pin,
+        "resolved_locality": locality,
+        "score": score,
+        "source": locality.get("type", "Unknown")
+    })
 
 @app.route('/api/route-complaint', methods=['POST'])
 def api_route_complaint():
